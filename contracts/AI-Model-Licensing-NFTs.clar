@@ -10,9 +10,12 @@
 (define-constant ERR_LICENSE_EXPIRED (err u105))
 (define-constant ERR_INVALID_USAGE_TYPE (err u106))
 (define-constant ERR_ROYALTY_TOO_HIGH (err u107))
+(define-constant ERR_INVALID_QUANTITY (err u108))
+(define-constant ERR_MAX_BULK_EXCEEDED (err u109))
 
 (define-data-var next-token-id uint u1)
 (define-data-var platform-fee uint u250)
+(define-data-var max-bulk-quantity uint u100)
 
 (define-map model-metadata uint {
   name: (string-ascii 64),
@@ -43,6 +46,11 @@
 })
 
 (define-map royalty-balances principal uint)
+
+(define-map bulk-discount-tiers uint {
+  min-quantity: uint,
+  discount-percentage: uint
+})
 
 (define-public (mint-ai-model
   (name (string-ascii 64))
@@ -221,6 +229,102 @@
   (match (map-get? active-licenses { token-id: token-id, licensee: licensee })
     license (get usage-count license)
     u0
+  )
+)
+
+(define-private (calculate-bulk-discount (base-price uint) (quantity uint))
+  (let (
+    (tier-1 (default-to { min-quantity: u999999, discount-percentage: u0 } (map-get? bulk-discount-tiers u1)))
+    (tier-2 (default-to { min-quantity: u999999, discount-percentage: u0 } (map-get? bulk-discount-tiers u2)))
+    (tier-3 (default-to { min-quantity: u999999, discount-percentage: u0 } (map-get? bulk-discount-tiers u3)))
+    (total-price (* base-price quantity))
+  )
+    (if (>= quantity (get min-quantity tier-3))
+      (- total-price (/ (* total-price (get discount-percentage tier-3)) u10000))
+      (if (>= quantity (get min-quantity tier-2))
+        (- total-price (/ (* total-price (get discount-percentage tier-2)) u10000))
+        (if (>= quantity (get min-quantity tier-1))
+          (- total-price (/ (* total-price (get discount-percentage tier-1)) u10000))
+          total-price
+        )
+      )
+    )
+  )
+)
+
+(define-public (set-bulk-discount-tier
+  (tier-id uint)
+  (min-quantity uint)
+  (discount-percentage uint)
+)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (<= discount-percentage u5000) ERR_INVALID_PRICE)
+    (asserts! (> min-quantity u1) ERR_INVALID_QUANTITY)
+    (map-set bulk-discount-tiers tier-id {
+      min-quantity: min-quantity,
+      discount-percentage: discount-percentage
+    })
+    (ok true)
+  )
+)
+
+(define-public (bulk-rent-license
+  (token-id uint)
+  (rental-duration uint)
+  (quantity uint)
+)
+  (let (
+    (model-data (unwrap! (map-get? model-metadata token-id) ERR_NOT_FOUND))
+    (license-data (unwrap! (map-get? license-terms token-id) ERR_NOT_FOUND))
+    (base-rental-price (* (get base-price model-data) rental-duration))
+    (discounted-price (calculate-bulk-discount base-rental-price quantity))
+    (creator (get creator model-data))
+    (royalty-amount (/ (* discounted-price (get royalty-percentage model-data)) u10000))
+    (platform-fee-amount (/ (* discounted-price (var-get platform-fee)) u10000))
+    (creator-amount (- discounted-price (+ royalty-amount platform-fee-amount)))
+    (current-block stacks-block-height)
+    (end-block (+ current-block (get duration-blocks license-data)))
+  )
+    (asserts! (> quantity u1) ERR_INVALID_QUANTITY)
+    (asserts! (<= quantity (var-get max-bulk-quantity)) ERR_MAX_BULK_EXCEEDED)
+    (asserts! (> discounted-price u0) ERR_INVALID_PRICE)
+    (try! (stx-transfer? creator-amount tx-sender creator))
+    (try! (stx-transfer? platform-fee-amount tx-sender CONTRACT_OWNER))
+    (map-set active-licenses
+      { token-id: token-id, licensee: tx-sender }
+      {
+        start-block: current-block,
+        end-block: end-block,
+        usage-count: u0,
+        rental-price: discounted-price
+      }
+    )
+    (map-set royalty-balances creator 
+      (+ (default-to u0 (map-get? royalty-balances creator)) royalty-amount)
+    )
+    (ok { total-paid: discounted-price, quantity: quantity, savings: (- (* base-rental-price quantity) discounted-price) })
+  )
+)
+
+(define-read-only (get-bulk-discount-tier (tier-id uint))
+  (map-get? bulk-discount-tiers tier-id)
+)
+
+(define-read-only (calculate-bulk-price (token-id uint) (rental-duration uint) (quantity uint))
+  (match (map-get? model-metadata token-id)
+    model-data
+      (let (
+        (base-rental-price (* (get base-price model-data) rental-duration))
+        (discounted-price (calculate-bulk-discount base-rental-price quantity))
+      )
+        (ok { 
+          base-price: (* base-rental-price quantity),
+          discounted-price: discounted-price,
+          savings: (- (* base-rental-price quantity) discounted-price)
+        })
+      )
+    ERR_NOT_FOUND
   )
 )
 
