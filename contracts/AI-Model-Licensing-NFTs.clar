@@ -12,6 +12,9 @@
 (define-constant ERR_ROYALTY_TOO_HIGH (err u107))
 (define-constant ERR_INVALID_QUANTITY (err u108))
 (define-constant ERR_MAX_BULK_EXCEEDED (err u109))
+(define-constant ERR_ALREADY_LISTED (err u110))
+(define-constant ERR_NOT_LISTED (err u111))
+(define-constant ERR_CANNOT_BUY_OWN_LISTING (err u112))
 
 (define-data-var next-token-id uint u1)
 (define-data-var platform-fee uint u250)
@@ -50,6 +53,14 @@
 (define-map bulk-discount-tiers uint {
   min-quantity: uint,
   discount-percentage: uint
+})
+
+(define-map marketplace-listings {
+  token-id: uint,
+  seller: principal
+} {
+  asking-price: uint,
+  listed-at-block: uint
 })
 
 (define-public (mint-ai-model
@@ -326,5 +337,72 @@
       )
     ERR_NOT_FOUND
   )
+)
+
+(define-public (list-license-for-sale (token-id uint) (asking-price uint))
+  (let (
+    (license-key { token-id: token-id, licensee: tx-sender })
+    (license (unwrap! (map-get? active-licenses license-key) ERR_NOT_FOUND))
+    (listing-key { token-id: token-id, seller: tx-sender })
+    (current-block stacks-block-height)
+  )
+    (asserts! (<= current-block (get end-block license)) ERR_LICENSE_EXPIRED)
+    (asserts! (> asking-price u0) ERR_INVALID_PRICE)
+    (asserts! (is-none (map-get? marketplace-listings listing-key)) ERR_ALREADY_LISTED)
+    (map-set marketplace-listings listing-key {
+      asking-price: asking-price,
+      listed-at-block: current-block
+    })
+    (ok true)
+  )
+)
+
+(define-public (delist-license (token-id uint))
+  (let (
+    (listing-key { token-id: token-id, seller: tx-sender })
+  )
+    (asserts! (is-some (map-get? marketplace-listings listing-key)) ERR_NOT_LISTED)
+    (map-delete marketplace-listings listing-key)
+    (ok true)
+  )
+)
+
+(define-public (purchase-listed-license (token-id uint) (seller principal))
+  (let (
+    (listing-key { token-id: token-id, seller: seller })
+    (listing (unwrap! (map-get? marketplace-listings listing-key) ERR_NOT_LISTED))
+    (license-key { token-id: token-id, licensee: seller })
+    (license (unwrap! (map-get? active-licenses license-key) ERR_NOT_FOUND))
+    (asking-price (get asking-price listing))
+    (current-block stacks-block-height)
+    (model-data (unwrap! (map-get? model-metadata token-id) ERR_NOT_FOUND))
+    (creator (get creator model-data))
+    (royalty-amount (/ (* asking-price (get royalty-percentage model-data)) u10000))
+    (platform-fee-amount (/ (* asking-price (var-get platform-fee)) u10000))
+    (seller-amount (- asking-price (+ royalty-amount platform-fee-amount)))
+  )
+    (asserts! (not (is-eq tx-sender seller)) ERR_CANNOT_BUY_OWN_LISTING)
+    (asserts! (<= current-block (get end-block license)) ERR_LICENSE_EXPIRED)
+    (try! (stx-transfer? seller-amount tx-sender seller))
+    (try! (stx-transfer? platform-fee-amount tx-sender CONTRACT_OWNER))
+    (map-set royalty-balances creator
+      (+ (default-to u0 (map-get? royalty-balances creator)) royalty-amount)
+    )
+    (map-delete marketplace-listings listing-key)
+    (map-delete active-licenses license-key)
+    (map-set active-licenses
+      { token-id: token-id, licensee: tx-sender }
+      license
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-listing (token-id uint) (seller principal))
+  (map-get? marketplace-listings { token-id: token-id, seller: seller })
+)
+
+(define-read-only (is-listed (token-id uint) (seller principal))
+  (is-some (map-get? marketplace-listings { token-id: token-id, seller: seller }))
 )
 
