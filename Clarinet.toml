@@ -1,0 +1,23 @@
+[project]
+name = 'AI-Model-Licensing-NFTs'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.AI-Model-Licensing-NFTs]
+path = 'contracts/AI-Model-Licensing-NFTs.clar'
+clarity_version = 3
+epoch = 3.1
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
+
+[repl.remote_data]
+enabled = false
+api_url = 'https://api.hiro.so'
